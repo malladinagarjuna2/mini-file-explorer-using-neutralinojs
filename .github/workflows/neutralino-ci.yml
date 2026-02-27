@@ -1,0 +1,46 @@
+name: Neutralino CI
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+      - uses: actions/cache@v3
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+      - run: npm install -g @neutralinojs/neu
+      - run: npm install
+      - run: neu build
+      - uses: actions/upload-artifact@v3
+        with:
+          name: js.neutralino.sample-build
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: js.neutralino.sample-build
+          path: dist/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -56,6 +56,23 @@
     </button>
   </div>
 
+  <!-- Video Player Modal -->
+  <div id="videoModal" class="video-modal">
+    <div class="video-container">
+      <div class="video-header">
+        <span id="videoTitle" class="video-title">Now Playing</span>
+        <button id="closeVideoBtn" class="close-video-btn">✕</button>
+      </div>
+      <video id="videoPlayer" class="video-player" controls="controls" autoplay>
+        <source id="videoSource" src="" type="video/mp4">
+        Your browser does not support the video tag.
+      </video>
+      <div class="video-info">
+        <p id="videoPath" class="video-path"></p>
+      </div>
+    </div>
+  </div>
+
   <script src="js/neutralino.js"></script>
   <script src="js/main.js"></script>
 </body>

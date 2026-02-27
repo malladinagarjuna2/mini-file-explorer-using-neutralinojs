@@ -1,9 +1,178 @@
 let currentPath = null;
 let selectedItem = null;
 let selectedItemType = null;
+let currentFolderTarget = null;  // Holds {type, path, handle} for cross-platform FS access
 
+// Video player state
+const SUPPORTED_VIDEO_EXTENSIONS = ['mp4', 'avi', 'mkv', 'webm', 'mov', 'flv', 'm4v', 'wmv', '3gp', 'ogv'];
 
-Neutralino.init();
+/**
+ * Check if a file is a video file based on its extension
+ */
+function isVideoFile(fileName) {
+    const ext = fileName.split('.').pop().toLowerCase();
+    return SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
+}
+
+/**
+ * Find the first video file in the directory
+ */
+async function findVideoInDirectory(entries) {
+    for (const entry of entries) {
+        if (entry.type === 'FILE' && isVideoFile(entry.entry)) {
+            return entry.entry;
+        }
+    }
+    return null;
+}
+
+/**
+ * Play a video file
+ */
+function playVideo(videoPath, videoFileName) {
+    const modal = document.getElementById('videoModal');
+    const videoPlayer = document.getElementById('videoPlayer');
+    const videoSource = document.getElementById('videoSource');
+    const videoTitle = document.getElementById('videoTitle');
+    const videoPathDisplay = document.getElementById('videoPath');
+    
+    // Set video source (Neutralino file path)
+    videoSource.src = `file:///${videoPath.replace(/\\/g, '/')}`;
+    videoPlayer.load();
+    videoPlayer.play();
+    
+    // Update UI
+    videoTitle.textContent = `Now Playing: ${videoFileName}`;
+    videoPathDisplay.textContent = `📁 ${videoPath}`;
+    
+    modal.classList.add('active');
+}
+
+/**
+ * Close video player
+ */
+function closeVideoPlayer() {
+    const modal = document.getElementById('videoModal');
+    const videoPlayer = document.getElementById('videoPlayer');
+    
+    videoPlayer.pause();
+    videoPlayer.currentTime = 0;
+    modal.classList.remove('active');
+}
+
+// Close video player button event
+document.getElementById('closeVideoBtn').addEventListener('click', closeVideoPlayer);
+
+// Close video player when clicking outside
+document.getElementById('videoModal').addEventListener('click', (e) => {
+    if (e.target.id === 'videoModal') {
+        closeVideoPlayer();
+    }
+});
+
+// Initialize Neutralino only when running inside the Neutralino native runtime.
+// When serving from a normal browser (HTTP), NL_PORT / NL_TOKEN will be undefined
+// and Neutralino.init() attempts a WebSocket connection to an invalid URL.
+if (typeof Neutralino !== 'undefined' && (window.NL_PORT || window.NL_TOKEN || window.NL_CINJECTED || window.NL_GINJECTED)) {
+    try {
+        Neutralino.init();
+    } catch (e) {
+        console.warn('Neutralino.init() failed:', e);
+    }
+} else {
+    // Running in a regular browser — Neutralino runtime not available.
+    console.log('Neutralino runtime not detected; using browser fallback.');
+}
+
+// ============================================================================
+// BROWSER FALLBACK: File System Access API helpers
+// ============================================================================
+
+let browserFolderHandle = null;
+
+/**
+ * Cross-platform folder picker.
+ * - In Neutralino: uses Neutralino.os.showFolderDialog
+ * - In browser: uses showDirectoryPicker (triggers permission prompt)
+ */
+async function selectFolder() {
+    if (typeof Neutralino !== 'undefined' && (window.NL_PORT || window.NL_TOKEN)) {
+        // Neutralino native app
+        try {
+            const selectedPath = await Neutralino.os.showFolderDialog('Select a folder', {
+                defaultPath: 'C:\\Users'
+            });
+            return { type: 'neutralino', path: selectedPath };
+        } catch (err) {
+            console.error('Neutralino folder selection failed:', err);
+            throw err;
+        }
+    } else if (window.showDirectoryPicker) {
+        // Browser with File System Access API (will show permission prompt)
+        try {
+            const handle = await window.showDirectoryPicker();
+            browserFolderHandle = handle;
+            return { type: 'web', handle };
+        } catch (err) {
+            console.error('Browser folder selection failed:', err);
+            throw err;
+        }
+    } else {
+        throw new Error('No folder picker available (Neutralino or File System Access API)');
+    }
+}
+
+/**
+ * Read directory entries from either Neutralino or web handle.
+ */
+async function listDirectory(target) {
+    if (target.type === 'neutralino') {
+        return await Neutralino.filesystem.readDirectory(target.path);
+    } else if (target.type === 'web' && target.handle) {
+        const entries = [];
+        try {
+            for await (const [name, handle] of target.handle.entries()) {
+                entries.push({
+                    entry: name,
+                    type: handle.kind === 'directory' ? 'DIRECTORY' : 'FILE'
+                });
+            }
+        } catch (err) {
+            console.error('Error listing web directory:', err);
+        }
+        return entries;
+    }
+    return [];
+}
+
+/**
+ * Get file/directory stats.
+ */
+async function getItemStats(target, name) {
+    if (target.type === 'neutralino') {
+        const sep = target.path.includes('\\') ? '\\' : '/';
+        const fullPath = target.path + sep + name;
+        return await Neutralino.filesystem.getStats(fullPath);
+    } else if (target.type === 'web' && target.handle) {
+        try {
+            const handle = await target.handle.getFileHandle(name);
+            const file = await handle.getFile();
+            return {
+                isDirectory: false,
+                size: file.size,
+                modifiedAt: file.lastModified
+            };
+        } catch (err) {
+            try {
+                await target.handle.getDirectoryHandle(name);
+                return { isDirectory: true, size: 0 };
+            } catch {
+                throw err;
+            }
+        }
+    }
+    return null;
+}
 
 
 function getPathSeparator(basePath) {
@@ -40,12 +209,12 @@ async function deleteDirectoryRecursive(dirPath, separator) {
 // FOLDER SELECTION WITH POLLING (see polling section below for actual implementation)
 
 document.getElementById('readdirectory').addEventListener("click", async() => {
-if(!currentPath){
-     alert(" Please select a  folder first");
+if(!currentPath || !currentFolderTarget){
+     alert("Please select a folder first");
      return;
 } 
 try {
-    const entries = await Neutralino.filesystem.readDirectory(currentPath);
+    const entries = await listDirectory(currentFolderTarget);
     console.log(entries);
     
  
@@ -84,6 +253,7 @@ try {
 
 }catch(err){
     console.log(err);
+    alert('Failed to read directory: ' + (err.message || err));
 }
 
 });
@@ -299,20 +469,17 @@ const POLLING_INTERVAL = 3000;
 
 
 
-async function takeSnapshot(path) {
+async function takeSnapshot(folderTarget) {
     const snapshot = {};
     
     try {
-        const entries = await Neutralino.filesystem.readDirectory(path);
-            const separator = getPathSeparator(path);
+        const entries = await listDirectory(folderTarget);
         
         for (const entry of entries) {
-        
             if (entry.entry === '.' || entry.entry === '..') continue;
             
             try {
-                const fullPath = path + separator + entry.entry;
-                const stats = await Neutralino.filesystem.getStats(fullPath);
+                const stats = await getItemStats(folderTarget, entry.entry);
                 
                 snapshot[entry.entry] = {
                     mtime: stats.modifiedAt || stats.createdAt || 0,
@@ -388,28 +555,28 @@ async function reactToChanges(changes) {
 }
 
 
-async function startPolling(path) {
+async function startPolling(folderTarget) {
    
     stopPolling();
     
-    if (!path) {
-        console.warn('Cannot start polling: no path provided');
+    if (!folderTarget) {
+        console.warn('Cannot start polling: no folder target provided');
         return;
     }
     
-    console.log(`Starting polling for: ${path}`);
+    console.log(`Starting polling for:`, folderTarget);
     
 
     document.getElementById('pollingIndicator').style.display = 'inline-flex';
     
 
-    previousSnapshot = await takeSnapshot(path);
+    previousSnapshot = await takeSnapshot(folderTarget);
     
    
     pollingTimer = setInterval(async () => {
         try {
   
-            const newSnapshot = await takeSnapshot(path);
+            const newSnapshot = await takeSnapshot(folderTarget);
             
             const changes = compareSnapshots(previousSnapshot, newSnapshot);
             
@@ -450,28 +617,59 @@ function stopPolling() {
 
 
 document.getElementById('selectFolderBtn').addEventListener("click", async() => {
-    try{
-        const selectedPath = await Neutralino.os.showFolderDialog('Select a folder', {
-            defaultPath: 'C:\\Users'
-        });
-        console.log(selectedPath);
+    try {
+        const folderTarget = await selectFolder();
+        console.log('Selected folder:', folderTarget);
         
-     
         stopPolling();
         
-        currentPath = selectedPath;
-        document.getElementById("folderPath").innerText = selectedPath;
+        // Store the target for later use in reads/writes
+        currentFolderTarget = folderTarget;
         
-   
+        // Display path (for Neutralino) or "Web Directory" (for web)
+        if (folderTarget.type === 'neutralino') {
+            currentPath = folderTarget.path;
+            document.getElementById("folderPath").innerText = folderTarget.path;
+        } else {
+            currentPath = '[Web Directory]';
+            document.getElementById("folderPath").innerText = `[Web Directory: ${folderTarget.handle.name}]`;
+        }
+        
+        // Refresh the directory listing
         document.getElementById('readdirectory').click();
         
+        // Start polling for changes
+        startPolling(folderTarget);
         
-        startPolling(selectedPath);
+        // Auto-play video if found
+        await autoPlayVideoIfFound();
         
-    } catch(err){
-        console.error(err);
+    } catch (err) {
+        console.error('Folder selection error:', err);
+        alert('Failed to select folder: ' + (err.message || err));
     }
 });
+
+/**
+ * Auto-play the first video found in the selected folder
+ */
+async function autoPlayVideoIfFound() {
+    if (!currentFolderTarget || !currentPath) return;
+    
+    try {
+        const entries = await listDirectory(currentFolderTarget);
+        const videoFileName = await findVideoInDirectory(entries);
+        
+        if (videoFileName) {
+            const pathSeparator = getPathSeparator(currentPath);
+            const videoPath = currentPath + pathSeparator + videoFileName;
+            console.log('Auto-playing video:', videoFileName);
+            playVideo(videoPath, videoFileName);
+        }
+    } catch (err) {
+        console.error('Error checking for videos:', err);
+    }
+}
 
 
 
